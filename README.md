@@ -90,6 +90,21 @@ recusa quando detecta **trabalho em voo**:
   **próximo ponto seguro** (step boundary), **funde** pedidos repetidos e roda mesmo com
   `compaction.auto: false`.
 
+### Instâncias isoladas (ex.: `opencode-2`)
+
+Se você roda uma **segunda instância** com `XDG_*` próprios (wrapper `opencode-2`), as duas pontas
+precisam apontar para a **mesma** instância — o banco **e** o binário que fala com a API:
+
+```bash
+OPENCODE_COMPACT_DB=~/.opencode-go2/data/opencode/opencode.db \
+OPENCODE_COMPACT_BIN=opencode-2 opencode-compact-if-big --above 600k --apply
+```
+
+| Flag / env | Para quê |
+|---|---|
+| `--db` / `$OPENCODE_COMPACT_DB` | qual banco ler (onde estão as sessões) |
+| `--bin` / `$OPENCODE_COMPACT_BIN` | qual binário/instância fala com a API (padrão `opencode`) |
+
 ### Ordem de resolução do banco
 
 1. `--db CAMINHO`

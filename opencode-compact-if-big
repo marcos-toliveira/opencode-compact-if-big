@@ -23,6 +23,11 @@ USO (CLI):
   opencode-compact-if-big --session ses_xxx --apply
   opencode-compact-if-big --session ses_xxx --apply --force
 
+USO EM INSTÂNCIA ISOLADA (ex.: opencode-2, com XDG próprio) — as duas pontas precisam apontar
+para a MESMA instância (banco + binário que fala com a API):
+  OPENCODE_COMPACT_DB=~/.opencode-go2/data/opencode/opencode.db \
+  OPENCODE_COMPACT_BIN=opencode-2 opencode-compact-if-big --above 600k --apply
+
 USO (TUI — curses, sem dependências):
   opencode-compact-if-big --tui
   ↑/↓ mover · r atualizar · a armar/aplicar de verdade · +/- teto · o ordenar · t todas
@@ -47,8 +52,9 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 TESTADO_COM = "opencode v2.0.20 (beta)"
+BINARIO = ["opencode"]  # preenchido em main() (--bin / $OPENCODE_COMPACT_BIN); permite instâncias isoladas
 
 
 def resolver_db(explicito: str | None = None) -> str:
@@ -74,6 +80,16 @@ def resolver_db(explicito: str | None = None) -> str:
         base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
         return os.path.join(base, "opencode", "opencode.db")
     return os.path.expanduser("~/.local/share/opencode/opencode.db")
+
+
+def resolver_bin(explicito: str | None = None) -> str:
+    """--bin > $OPENCODE_COMPACT_BIN > `opencode`.
+
+    Necessário para instâncias isoladas (ex.: um wrapper `opencode-2` com XDG próprio,
+    que fala com o serviço daquela instância). O banco correspondente vai em --db /
+    $OPENCODE_COMPACT_DB — as duas pontas precisam apontar para a MESMA instância.
+    """
+    return explicito or os.environ.get("OPENCODE_COMPACT_BIN") or "opencode"
 
 
 def parse_size(s: str) -> int:
@@ -174,13 +190,13 @@ def load_sessions(db: str, idle_window: int, titulos: bool = True) -> list[dict]
     return sorted(out, key=lambda x: -x["t"])
 
 
-def request_compaction(session: str, timeout: int = 60) -> tuple[bool, str]:
+def request_compaction(session: str, timeout: int = 60, binario: str = "opencode") -> tuple[bool, str]:
     """Pede a compactação via API local (roda no próximo ponto seguro, funde pedidos repetidos)."""
-    cmd = ["opencode", "api", "POST", f"/api/session/{session}/compact", "-d", "{}"]
+    cmd = [binario, "api", "POST", f"/api/session/{session}/compact", "-d", "{}"]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
-        return False, "binário `opencode` não encontrado"
+        return False, f"binário `{binario}` não encontrado"
     except subprocess.TimeoutExpired:
         return False, f"timeout de {timeout}s ao chamar a API"
     out = (p.stdout or "").strip() or (p.stderr or "").strip()
@@ -293,7 +309,7 @@ def tui(args) -> int:
         if not ok:
             estado["msg"] = "cancelado"
             return
-        ok, msg = request_compaction(s["session"])
+        ok, msg = request_compaction(s["session"], binario=BINARIO[0])
         estado["msg"] = f"{'pedido aceito' if ok else 'FALHOU'}: {msg[:80]}"
         recarregar()
 
@@ -367,10 +383,14 @@ def main(argv=None) -> int:
                     help="janela (s) para considerar subagente ativo (padrão: 600)")
     ap.add_argument("--limit", type=int, default=10, help="linhas no relatório (padrão: 10)")
     ap.add_argument("--db", default=None, help="caminho do opencode.db (padrão: autodetectado)")
+    ap.add_argument("--bin", default=None,
+                    help="binário que fala com a API da instância (padrão: opencode; "
+                         "use opencode-2 para instâncias isoladas)")
     ap.add_argument("-V", "--version", action="version",
                     version=f"opencode-compact-if-big {VERSION} (testado com {TESTADO_COM})")
     args = ap.parse_args(argv)
     args.db = resolver_db(args.db)
+    BINARIO[0] = resolver_bin(args.bin)
 
     if args.tui:
         if not os.path.exists(args.db):
@@ -379,7 +399,7 @@ def main(argv=None) -> int:
         return tui(args)
 
     print(f'M=compactIfBig, I="iniciando", teto={human(args.above)}, modo='
-          f'{"apply" if args.apply else "dry-run"}, status=init')
+          f'{"apply" if args.apply else "dry-run"}, bin={BINARIO[0]}, status=init')
 
     if not os.path.exists(args.db):
         print(f'M=compactIfBig, E="banco ausente: {args.db}" (use --db ou $OPENCODE_COMPACT_DB), '
@@ -423,7 +443,7 @@ def main(argv=None) -> int:
         if not args.apply:
             print(f'  -> [dry-run] pediria: opencode api POST /api/session/{s["session"]}/compact')
             continue
-        ok, msg = request_compaction(s["session"])
+        ok, msg = request_compaction(s["session"], binario=BINARIO[0])
         print(f'  -> {"pedido aceito" if ok else "FALHOU"}: {msg}')
         if not ok:
             rc = 1

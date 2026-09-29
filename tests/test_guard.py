@@ -211,5 +211,43 @@ class TestResolucaoDeDb(unittest.TestCase):
         self.assertEqual(OCIB.human(0), "0")
 
 
+class TestInstanciaIsolada(unittest.TestCase):
+    """Instâncias isoladas (ex.: opencode-2) exigem binário + banco da MESMA instância."""
+
+    def test_resolver_bin_precedencia(self):
+        self.assertEqual(OCIB.resolver_bin("opencode-2"), "opencode-2")
+        os.environ["OPENCODE_COMPACT_BIN"] = "opencode-9"
+        try:
+            self.assertEqual(OCIB.resolver_bin(None), "opencode-9")
+            self.assertEqual(OCIB.resolver_bin("opencode-3"), "opencode-3")
+        finally:
+            del os.environ["OPENCODE_COMPACT_BIN"]
+        self.assertEqual(OCIB.resolver_bin(None), "opencode")
+
+    def test_request_compaction_usa_o_binario(self):
+        capturado = {}
+
+        class Falso:
+            returncode = 0
+            stdout = "aceito"
+            stderr = ""
+
+        original = OCIB.subprocess.run
+
+        def fake(cmd, **kwargs):
+            capturado["cmd"] = cmd
+            return Falso()
+
+        OCIB.subprocess.run = fake
+        try:
+            ok, _ = OCIB.request_compaction("ses_alvo", binario="opencode-2")
+            self.assertTrue(ok)
+            self.assertEqual(capturado["cmd"][0], "opencode-2",
+                             "a chamada deve sair pelo binário da instância")
+            self.assertIn("/api/session/ses_alvo/compact", capturado["cmd"])
+        finally:
+            OCIB.subprocess.run = original
+
+
 if __name__ == "__main__":
     unittest.main()
