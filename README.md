@@ -57,6 +57,17 @@ opencode-compact-if-big --tui                     # interface interativa
 opencode-compact-if-big --no-titles --list        # sem títulos (privacidade)
 ```
 
+### Painel / barra de status
+
+```bash
+opencode-compact-if-big --status
+# maior 852k em voo(1x) | 2 acima de 600k | 31 recentes
+```
+
+Uma linha ASCII, sem as linhas de log — feita para painéis e barras (ex.: widget de
+[tclock](https://github.com/akitaonrails/clock-tui)). Ela ignora sessões paradas (>24 h), que não
+interessam ao painel.
+
 ### TUI
 
 ```

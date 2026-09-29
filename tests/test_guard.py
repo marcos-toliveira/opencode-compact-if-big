@@ -211,6 +211,27 @@ class TestResolucaoDeDb(unittest.TestCase):
         self.assertEqual(OCIB.human(0), "0")
 
 
+class TestStatus(unittest.TestCase):
+    """Modo --status: uma linha compacta para painéis (tclock etc.)."""
+
+    def test_resume_ignora_paradas(self):
+        sess = [{"ctx": 800_000, "em_voo": ["1 subagente(s) ativo(s)"], "parada": False},
+                {"ctx": 700_000, "em_voo": [], "parada": False},
+                {"ctx": 900_000, "em_voo": [], "parada": True}]
+        linha = OCIB.linha_status(sess, 600_000)
+        self.assertIn("800k", linha, "a maior PARADA (900k) não deve dominar o painel")
+        self.assertIn("em voo", linha)
+        self.assertIn("2 acima de 600k", linha)
+        self.assertIn("2 recentes", linha)
+
+    def test_tudo_parado(self):
+        sess = [{"ctx": 900_000, "em_voo": [], "parada": True}]
+        self.assertEqual(OCIB.linha_status(sess, 600_000), "nenhuma sessao recente")
+
+    def test_vazio(self):
+        self.assertEqual(OCIB.linha_status([], 600_000), "nenhuma sessao recente")
+
+
 class TestInstanciaIsolada(unittest.TestCase):
     """Instâncias isoladas (ex.: opencode-2) exigem binário + banco da MESMA instância."""
 

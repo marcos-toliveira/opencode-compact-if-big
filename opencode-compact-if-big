@@ -52,7 +52,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 TESTADO_COM = "opencode v2.0.20 (beta)"
 BINARIO = ["opencode"]  # preenchido em main() (--bin / $OPENCODE_COMPACT_BIN); permite instâncias isoladas
 
@@ -188,6 +188,22 @@ def load_sessions(db: str, idle_window: int, titulos: bool = True) -> list[dict]
                     "title": (meta.get(sid) or {}).get("title", ""),
                     "directory": (meta.get(sid) or {}).get("directory", "")})
     return sorted(out, key=lambda x: -x["t"])
+
+
+def linha_status(sessions: list[dict], teto: int) -> str:
+    """Uma linha compacta (ASCII) para barras/painéis (ex.: tclock). Sem linhas de log."""
+    recentes = [s for s in sessions if not s.get("parada")]  # sessao parada nao interessa ao painel
+    if not recentes:
+        return "nenhuma sessao recente"
+    maior = max(recentes, key=lambda s: s["ctx"])
+    acima = [s for s in recentes if s["ctx"] >= teto]
+    est = ""
+    if maior["em_voo"]:
+        est = f" em voo({len(maior['em_voo'])}x)"
+    elif maior.get("parada"):
+        est = " parada"
+    return (f"maior {human(maior['ctx'])}{est} | "
+            f"{len(acima)} acima de {human(teto)} | {len(recentes)} recentes")
 
 
 def request_compaction(session: str, timeout: int = 60, binario: str = "opencode") -> tuple[bool, str]:
@@ -377,6 +393,8 @@ def main(argv=None) -> int:
     ap.add_argument("--session", help="sessão específica (padrão: a mais recente acima do teto)")
     ap.add_argument("--all", action="store_true", help="considera todas as sessões acima do teto")
     ap.add_argument("--list", action="store_true", help="apenas lista as sessões e tamanhos")
+    ap.add_argument("--status", action="store_true",
+                    help="uma linha compacta (para painéis/barras, ex.: tclock); não age")
     ap.add_argument("--tui", action="store_true", help="interface interativa (curses)")
     ap.add_argument("--no-titles", action="store_true", help="não exibe títulos de sessão (privacidade)")
     ap.add_argument("--idle-window", type=int, default=600,
@@ -391,6 +409,17 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     args.db = resolver_db(args.db)
     BINARIO[0] = resolver_bin(args.bin)
+
+    if args.status:
+        if not os.path.exists(args.db):
+            print(f"banco ausente: {args.db}")
+            return 2
+        try:
+            print(linha_status(load_sessions(args.db, args.idle_window, False), args.above))
+        except SystemExit as e:
+            print(str(e).splitlines()[0])
+            return 2
+        return 0
 
     if args.tui:
         if not os.path.exists(args.db):
