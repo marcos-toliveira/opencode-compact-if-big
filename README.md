@@ -62,17 +62,6 @@ opencode-compact-if-big --no-titles --list        # sem títulos (privacidade)
 ```bash
 opencode-compact-if-big --status
 # maior 852k em voo(1x) | 2 acima de 600k | 31 recentes
-```
-
-Uma linha ASCII, sem as linhas de log — feita para painéis e barras (ex.: widget de
-[tclock](https://github.com/akitaonrails/clock-tui)). Ela ignora sessões paradas (>24 h), que não
-interessam ao painel.
-
-### Painel / barra de status
-
-```bash
-opencode-compact-if-big --status
-# maior 852k em voo(1x) | 2 acima de 600k | 31 recentes
 
 opencode-compact-if-big --status --sessions 10     # + ate 10 sessoes (uma linha cada)
 # maior 770k | 2 acima de 600k | 9 recentes
@@ -82,8 +71,42 @@ opencode-compact-if-big --status --sessions 10     # + ate 10 sessoes (uma linha
 
 Uma linha ASCII (ou uma por sessao com `--sessions N`), sem as linhas de log - feita para painéis e
 barras (ex.: widget de [tclock](https://github.com/akitaonrails/clock-tui)). O estado por sessao vem
-curto: `livre`, `parada`, `turno` (turno em andamento), `subN` (N subagentes ativos), `filaN`.
-Sessões paradas (>24 h) não entram no resumo.
+curto: `livre`, `parada`, `turno` (turno em andamento), `subN` (N subagentes ativos), `filaN`,
+`resumida` (compactada e sem uso novo). Sessões paradas (>24 h) não entram no resumo, e uma sessão
+já compactada e sem uso novo **não conta** como "acima do teto".
+
+### Gatilho automático (`--once` / `--watch`)
+
+```bash
+# uma varredura e sai (systemd timer / cron). Sem --apply, apenas registra o que faria.
+opencode-compact-if-big --once --above 600k --apply --ocioso 120 --log ~/.local/state/opencode-compact/compact.log
+
+# varredura contínua a cada 300 s (Ctrl-C sai)
+opencode-compact-if-big --watch 300 --above 600k --apply --ocioso 120
+```
+
+| Opção | Para que serve |
+|---|---|
+| `--once` | uma passada e sai (ideal para `systemd` timer) |
+| `--watch SEG` | laço contínuo, uma passada a cada SEG segundos |
+| `--ocioso MIN` | só age em sessão **sem atividade** há >= MIN (aceita `15`, `15min`, `2h`, `90s`) |
+| `--log ARQ` | registra cada passada e cada ação (append) |
+
+Três regras que a varredura respeita além das [travas](#travas-por-que-é-seguro):
+
+1. **já compactada e sem uso novo** -> fora. Depois de compactar, o `ctx` (tokens do último
+   `assistant`) fica **congelado** no valor antigo; sem essa regra a sessão pareceria "acima do
+   teto" para sempre e o gatilho tentaria a cada passada (o servidor responde
+   `compaction.unavailable: Nothing to compact yet`);
+2. **atividade real** -> a ociosidade é medida pela última mensagem de **usuário ou assistente**;
+   `idle` e `compaction` são escritura contábil da própria automação e **não** contam;
+3. **backoff** -> tentativa que falhou há menos de 60 min não é repetida na mesma hora.
+
+> **Caso real (30/09/2026, virou regressão nos testes):** a primeira versão media a ociosidade pelo
+> último `assistant`. Numa conversa ativa, um turno longo (ou o tempo que o operador leva lendo)
+> parecia "sessão abandonada" (`ocioso=49min`) e o gatilho **compactou a própria conversa em uso**.
+> Duas correções saíram daí: medir atividade real e pular sessões já compactadas. Se for usar
+> `--apply` em timer, escolha `--ocioso` com folga (ex.: `2h`) — compactar é irreversível e lossy.
 
 ### TUI
 
@@ -103,7 +126,9 @@ recusa quando detecta **trabalho em voo**:
 1. **turno em andamento** — a última mensagem do assistente tem `finish='tool-calls'`;
 2. **subagente ativo** — alguma sessão-filha com atividade nos últimos `--idle-window` segundos
    (padrão 600) **e** posterior ao último item do pai;
-3. **fila** — registros em `session_pending` / `session_inbox`.
+3. **fila** — registros em `session_pending` / `session_inbox`;
+4. **já compactada sem uso novo** e **backoff de falha** — ver
+   [Gatilho automático](#gatilho-automático---once----watch) (evitam laço de pedidos repetidos).
 
 > Caso real que originou a trava: uma sessão estava "aguardando subagentes" com `finish='stop'` —
 > o sinal de turno **não** a pegava; **só a atividade das sessões-filhas** a classifica como em voo.

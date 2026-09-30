@@ -69,6 +69,18 @@ def assistant(sid, t, cache=200_000, finish="stop", out=100):
     return ("session_message", sid, t, "assistant", json.dumps(data))
 
 
+def user(sid, t, texto="oi"):
+    return ("session_message", sid, t, "user", json.dumps({"text": texto}))
+
+
+def idle(sid, t):
+    return ("session_message", sid, t, "idle", json.dumps({}))
+
+
+def compaction(sid, t, status="completed"):
+    return ("session_message", sid, t, "compaction", json.dumps({"status": status}))
+
+
 def sessao(sid, titulo="titulo secreto do cliente", cwd="/home/user/projeto-confidencial", parent=None):
     return ("session_v2", sid, cwd, titulo, parent)
 
@@ -262,6 +274,48 @@ class TestElegiveis(unittest.TestCase):
             OCIB.parse_min("abc")
 
 
+    def test_ja_compactada_sem_uso_nao_e_alvo(self):
+        """Depois de compactar, o `ctx` fica congelado no valor antigo - nao pode voltar a ser alvo."""
+        agora = 1_000_000_000_000
+        sess = [{"session": "a", "ctx": 700_000, "em_voo": [], "t": agora - 60 * 60_000,
+                 "comp_t": agora - 30 * 60_000, "comp_status": "completed",
+                 "compactada_sem_uso": True}]
+        self.assertEqual(OCIB.elegiveis(sess, 600_000, 15, agora), [])
+
+    def test_uso_novo_apos_compactacao_volta_a_ser_alvo(self):
+        agora = 1_000_000_000_000
+        sess = [{"session": "a", "ctx": 700_000, "em_voo": [], "t": agora - 60 * 60_000,
+                 "comp_t": agora - 30 * 60_000, "comp_status": "completed",
+                 "compactada_sem_uso": False}]
+        self.assertEqual(len(OCIB.elegiveis(sess, 600_000, 15, agora)), 1)
+
+    def test_falha_recente_tem_backoff(self):
+        agora = 1_000_000_000_000
+        sess = [{"session": "a", "ctx": 700_000, "em_voo": [], "t": agora - 60 * 60_000,
+                 "comp_t": agora - 10 * 60_000, "comp_status": "failed",
+                 "compactada_sem_uso": False}]
+        self.assertEqual(OCIB.elegiveis(sess, 600_000, 15, agora), [])
+        self.assertEqual(len(OCIB.elegiveis(sess, 600_000, 15, agora + 120 * 60_000)), 1)
+
+
+class TestPainelResumidas(unittest.TestCase):
+    """O painel nao pode anunciar como "acima do teto" uma sessao que ja foi compactada."""
+
+    def test_compactada_nao_conta(self):
+        s = [{"session": "a", "ctx": 733_000, "t": 1, "parada": False, "em_voo": [],
+              "compactada_sem_uso": True},
+             {"session": "b", "ctx": 200_000, "t": 2, "parada": False, "em_voo": [],
+              "compactada_sem_uso": False}]
+        linha = OCIB.linha_status(s, 600_000)
+        self.assertIn("0 acima de 600k", linha)
+        self.assertIn("maior 200k", linha)
+
+    def test_todas_resumidas(self):
+        s = [{"session": "a", "ctx": 733_000, "t": 1, "parada": False, "em_voo": [],
+              "compactada_sem_uso": True}]
+        self.assertIn("resumida", OCIB.linha_status(s, 600_000))
+
+
 class TestStatus(unittest.TestCase):
     """Modo --status: uma linha compacta para painéis (tclock etc.)."""
 
@@ -323,3 +377,49 @@ class TestInstanciaIsolada(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOciosidadeReal(unittest.TestCase):
+    """Regressao 30/09/2026: o gatilho compactou a CONVERSA ATIVA porque media a ociosidade pelo
+    ultimo `assistant` - um turno longo (ou o tempo que o operador leva lendo) parecia sessao
+    abandonada (log: `ocioso=49min` com a sessao em uso)."""
+
+    def decidir(self, linhas, sid, idle_window=600):
+        caminho = criar_db(linhas)
+        try:
+            alvo = [s for s in OCIB.load_sessions(caminho, idle_window) if s["session"] == sid]
+            self.assertTrue(alvo, "sessao nao encontrada")
+            return alvo[0]
+        finally:
+            os.unlink(caminho)
+
+    def test_usuario_recente_conta_como_atividade(self):
+        # ultimo assistant ha 40 min, mas o operador escreveu ha 2 min: NAO esta ociosa
+        linhas = [sessao("ses_a"), assistant("ses_a", AGORA - 40 * 60_000),
+                  user("ses_a", AGORA - 2 * 60_000)]
+        s = self.decidir(linhas, "ses_a")
+        self.assertFalse(s["parada"])
+        self.assertEqual(OCIB.elegiveis([s], 100_000, 15, AGORA), [])
+
+    def test_idle_nao_rejuvenesce_a_sessao(self):
+        # escritura contabil da propria automacao nao e atividade: segue ociosa ha 40 min
+        linhas = [sessao("ses_a"), assistant("ses_a", AGORA - 40 * 60_000),
+                  idle("ses_a", AGORA - 60_000)]
+        s = self.decidir(linhas, "ses_a")
+        alvos = OCIB.elegiveis([s], 100_000, 15, AGORA)
+        self.assertEqual(len(alvos), 1)
+        self.assertAlmostEqual(alvos[0]["ocioso_min"], 40.0, places=1)
+
+    def test_compactada_sem_uso_nao_volta(self):
+        linhas = [sessao("ses_a"), assistant("ses_a", AGORA - 40 * 60_000),
+                  compaction("ses_a", AGORA - 30 * 60_000)]
+        s = self.decidir(linhas, "ses_a")
+        self.assertTrue(s["compactada_sem_uso"])
+        self.assertEqual(OCIB.elegiveis([s], 100_000, 15, AGORA), [])
+
+    def test_uso_novo_depois_da_compactacao_volta_a_ser_alvo(self):
+        linhas = [sessao("ses_a"), assistant("ses_a", AGORA - 40 * 60_000),
+                  compaction("ses_a", AGORA - 30 * 60_000), user("ses_a", AGORA - 2 * 60_000)]
+        s = self.decidir(linhas, "ses_a")
+        self.assertFalse(s["compactada_sem_uso"])
+        self.assertEqual(len(OCIB.elegiveis([s], 100_000, 0, AGORA)), 1)

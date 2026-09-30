@@ -52,7 +52,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 TESTADO_COM = "opencode v2.0.20 (beta)"
 BINARIO = ["opencode"]  # preenchido em main() (--bin / $OPENCODE_COMPACT_BIN); permite instâncias isoladas
 
@@ -159,10 +159,23 @@ def load_sessions(db: str, idle_window: int, titulos: bool = True) -> list[dict]
         except sqlite3.Error:
             pass
 
-    last_ctx, last_msg, kids_last = {}, {}, {}
+    last_ctx, last_msg, kids_last, comp, ativo = {}, {}, {}, {}, {}
     sql = "select session_id, time_created, type, data from session_message order by time_created"
     for sid, t, typ, data in con.execute(sql):
         kids_last[sid] = t
+        if typ == "compaction":
+            status = ""
+            try:
+                status = (json.loads(data) or {}).get("status") or ""
+            except Exception:
+                pass
+            comp[sid] = (t, status or "?")
+            continue
+        if typ in ("user", "assistant"):
+            # Atividade REAL. `idle` e `compaction` sao escritura contabil da propria automacao e
+            # NAO contam: senao cada pedido de compactacao "rejuvenesceria" a sessao e o gatilho
+            # nunca respeitaria a janela de ociosidade.
+            ativo[sid] = t
         if typ != "assistant":
             continue
         try:
@@ -195,9 +208,23 @@ def load_sessions(db: str, idle_window: int, titulos: bool = True) -> list[dict]
             em_voo.append(f"{len(ativos)} subagente(s) ativo(s)")
         if pend.get(sid):
             em_voo.append(f"{pend[sid]} prompt(s) na fila")
-        out.append({"session": sid, "ctx": ctx, "t": info.get("t") or 0, "finish": finish,
+        ct, cs = comp.get(sid, (0, ""))
+        # A "ultima atividade" e a ultima mensagem de usuario/assistant - NAO o ultimo assistant.
+        # Medir pelo assistant fazia um turno longo (ou o tempo que o operador leva lendo) parecer
+        # "sessao abandonada": foi assim que o gatilho compactou a propria conversa em 30/09/2026
+        # (log: `ocioso=49min` com a sessao em uso).
+        t_atv = ativo.get(sid) or info.get("t") or 0
+        # Depois de compactar, o `ctx` acima (tokens do ULTIMO assistant) FICA CONGELADO no valor
+        # antigo: sem um novo pedido ao modelo nao existe numero novo. Sem esta marca a sessao
+        # pareceria "acima do teto" para sempre e o gatilho tentaria de novo a cada passada
+        # (o servidor responde `compaction.unavailable: Nothing to compact yet` - laco observado
+        # em 30/09/2026, 11 tentativas em 1h).
+        sem_uso = bool(ct and ct >= t_atv)
+        out.append({"session": sid, "ctx": ctx, "t": t_atv, "t_assistant": info.get("t") or 0,
+                    "finish": finish,
                     "kids": len(ativos), "pend": pend.get(sid, 0), "em_voo": em_voo,
-                    "parada": bool(info.get("t")) and (agora - info["t"]) > 24 * 3600 * 1000,
+                    "parada": bool(t_atv) and (agora - t_atv) > 24 * 3600 * 1000,
+                    "comp_t": ct, "comp_status": cs, "compactada_sem_uso": sem_uso,
                     "title": (meta.get(sid) or {}).get("title", ""),
                     "directory": (meta.get(sid) or {}).get("directory", "")})
     return sorted(out, key=lambda x: -x["t"])
@@ -208,8 +235,14 @@ def linha_status(sessions: list[dict], teto: int) -> str:
     recentes = [s for s in sessions if not s.get("parada")]  # sessao parada nao interessa ao painel
     if not recentes:
         return "nenhuma sessao recente"
-    maior = max(recentes, key=lambda s: s["ctx"])
-    acima = [s for s in recentes if s["ctx"] >= teto]
+    # sessao ja compactada sem uso novo nao conta como "acima do teto": o `ctx` dela esta congelado
+    # no valor anterior a compactacao (nao ha numero novo ate o proximo pedido ao modelo).
+    vivas = [s for s in recentes if not s.get("compactada_sem_uso")]
+    resumidas = len(recentes) - len(vivas)
+    if not vivas:
+        return f"{resumidas} resumida(s) | 0 acima de {human(teto)}"
+    maior = max(vivas, key=lambda s: s["ctx"])
+    acima = [s for s in vivas if s["ctx"] >= teto]
     est = ""
     if maior["em_voo"]:
         est = f" em voo({len(maior['em_voo'])}x)"
@@ -233,16 +266,28 @@ def linhas_sessoes(sessions: list[dict], n: int) -> list[str]:
             partes.append(f"sub{s['kids']}")
         if s.get("pend"):
             partes.append(f"fila{s['pend']}")
-        est = " ".join(partes) or ("parada" if s.get("parada") else "livre")
+        est = " ".join(partes) or ("resumida" if s.get("compactada_sem_uso")
+                                   else ("parada" if s.get("parada") else "livre"))
         out.append(f"{s['session'][:16]:<16} {human(s['ctx']):>7}  {est}")
     return out
 
 
-def elegiveis(sessions: list[dict], teto: int, ocioso_min: float, agora_ms: int) -> list[dict]:
-    """Sessões que podem ser compactadas agora: acima do teto, sem trabalho em voo e já ociosas."""
+def elegiveis(sessions: list[dict], teto: int, ocioso_min: float, agora_ms: int,
+              backoff_min: float = 60.0) -> list[dict]:
+    """Sessões que podem ser compactadas agora: acima do teto, sem trabalho em voo e já ociosas.
+
+    Ficam de fora as que já foram compactadas e não tiveram uso novo desde então (não há o que
+    compactar - o servidor recusaria) e as que tiveram uma tentativa que falhou há pouco
+    (backoff, para não martelar a cada passada).
+    """
     out = []
     for s in sessions:
         if s["ctx"] < teto or s["em_voo"]:
+            continue
+        if s.get("compactada_sem_uso"):
+            continue
+        ct = s.get("comp_t") or 0
+        if ct and s.get("comp_status") == "failed" and (agora_ms - ct) / 60000.0 < backoff_min:
             continue
         idade = (agora_ms - s["t"]) / 60000.0 if s.get("t") else 10 ** 9
         if idade < ocioso_min:
@@ -263,11 +308,13 @@ def varredura(args, logf=None) -> int:
 
     agora = int(time.time() * 1000)
     sessoes = load_sessions(args.db, args.idle_window, not args.no_titles)
-    acima = [s for s in sessoes if s["ctx"] >= args.above]
+    acima = [s for s in sessoes if s["ctx"] >= args.above and not s.get("compactada_sem_uso")]
+    resumidas = len([s for s in sessoes if s.get("compactada_sem_uso")])
     alvos = elegiveis(sessoes, args.above, args.ocioso, agora)
     escreve(f'{time.strftime("%d/%m %H:%M:%S")}  teto={human(args.above)}  acima={len(acima)}  '
             f'ocioso>={args.ocioso:g}min  elegiveis={len(alvos)}  '
-            f'modo={"APPLY" if args.apply else "aviso"}')
+            f'modo={"APPLY" if args.apply else "aviso"}'
+            + (f'  resumidas={resumidas}' if resumidas else ''))
     for s in alvos:
         escreve(f'  alvo {s["session"][:26]} ctx={human(s["ctx"])} ocioso={s["ocioso_min"]:.0f}min '
                 f'titulo="{(s.get("title") or "")[:34]}"')
@@ -340,7 +387,12 @@ def tui(args) -> int:
         visiveis = max(1, h - 5)
         inicio = max(0, min(estado["sel"] - visiveis // 3, max(0, len(sessions) - visiveis)))
         for i, s in enumerate(sessions[inicio:inicio + visiveis], start=inicio):
-            est = ", ".join(s["em_voo"]) if s["em_voo"] else ("parada" if s.get("parada") else "livre")
+            if s["em_voo"]:
+                est = ", ".join(s["em_voo"])
+            elif s.get("compactada_sem_uso"):
+                est = "resumida (sem uso novo)"
+            else:
+                est = "parada" if s.get("parada") else "livre"
             linha = (f"{'→' if i == estado['sel'] else ' '} {s['session'][:26]:<26} {human(s['ctx']):>9} "
                      f"{est[:28]:<28} {idade(s['t']):>7}  {(s['title'] or '')[:max(0, w - 80)]}")
             attr = curses.A_REVERSE if i == estado["sel"] else cor(s)
