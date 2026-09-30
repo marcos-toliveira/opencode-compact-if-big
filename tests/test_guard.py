@@ -233,6 +233,35 @@ class TestResolucaoDeDb(unittest.TestCase):
         self.assertEqual(OCIB.human(0), "0")
 
 
+class TestElegiveis(unittest.TestCase):
+    """Regra do gatilho automatico: acima do teto, sem trabalho em voo e ociosa."""
+
+    def test_so_pega_acima_ociosa_e_livre(self):
+        agora = 1_000_000_000_000
+        sess = [
+            {"session": "a", "ctx": 700_000, "em_voo": [], "t": agora - 20 * 60_000},
+            {"session": "b", "ctx": 700_000, "em_voo": ["1 sub"], "t": agora - 20 * 60_000},
+            {"session": "c", "ctx": 700_000, "em_voo": [], "t": agora - 5 * 60_000},
+            {"session": "d", "ctx": 100_000, "em_voo": [], "t": agora - 20 * 60_000},
+        ]
+        alvos = OCIB.elegiveis(sess, 600_000, 15, agora)
+        self.assertEqual([s["session"] for s in alvos], ["a"])
+        self.assertAlmostEqual(alvos[0]["ocioso_min"], 20.0, places=1)
+
+    def test_ocioso_zero_pega_tudo_livre(self):
+        agora = 1_000_000_000_000
+        sess = [{"session": "a", "ctx": 700_000, "em_voo": [], "t": agora}]
+        self.assertEqual(len(OCIB.elegiveis(sess, 600_000, 0, agora)), 1)
+
+    def test_parse_min(self):
+        self.assertEqual(OCIB.parse_min("15"), 15)
+        self.assertEqual(OCIB.parse_min("15min"), 15)
+        self.assertEqual(OCIB.parse_min("1h"), 60)
+        self.assertAlmostEqual(OCIB.parse_min("90s"), 1.5)
+        with self.assertRaises(Exception):
+            OCIB.parse_min("abc")
+
+
 class TestStatus(unittest.TestCase):
     """Modo --status: uma linha compacta para painéis (tclock etc.)."""
 

@@ -52,7 +52,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 TESTADO_COM = "opencode v2.0.20 (beta)"
 BINARIO = ["opencode"]  # preenchido em main() (--bin / $OPENCODE_COMPACT_BIN); permite instâncias isoladas
 
@@ -99,6 +99,19 @@ def parse_size(s: str) -> int:
     val = float(m.group(1))
     mult = {"": 1, "k": 1_000, "m": 1_000_000}[m.group(2).lower()]
     return int(val * mult)
+
+
+def parse_min(s: str) -> float:
+    """'15' -> 15 min ; '15min' -> 15 ; '1h' -> 60 ; '90s' -> 1.5"""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*", (s or "").lower())
+    if not m:
+        raise argparse.ArgumentTypeError(f"tempo inválido: {s!r} (use 15, 15min, 1h, 90s)")
+    val, suf = float(m.group(1)), m.group(2)
+    if suf.startswith("h"):
+        return val * 60
+    if suf.startswith("s"):
+        return val / 60
+    return val
 
 
 def human(n: int) -> str:
@@ -223,6 +236,47 @@ def linhas_sessoes(sessions: list[dict], n: int) -> list[str]:
         est = " ".join(partes) or ("parada" if s.get("parada") else "livre")
         out.append(f"{s['session'][:16]:<16} {human(s['ctx']):>7}  {est}")
     return out
+
+
+def elegiveis(sessions: list[dict], teto: int, ocioso_min: float, agora_ms: int) -> list[dict]:
+    """Sessões que podem ser compactadas agora: acima do teto, sem trabalho em voo e já ociosas."""
+    out = []
+    for s in sessions:
+        if s["ctx"] < teto or s["em_voo"]:
+            continue
+        idade = (agora_ms - s["t"]) / 60000.0 if s.get("t") else 10 ** 9
+        if idade < ocioso_min:
+            continue
+        s = dict(s)
+        s["ocioso_min"] = idade
+        out.append(s)
+    return out
+
+
+def varredura(args, logf=None) -> int:
+    """Uma passada: lista e (com --apply) compacta as sessões elegíveis. Usada por --once/--watch."""
+    def escreve(txt: str) -> None:
+        print(txt, flush=True)
+        if logf:
+            logf.write(txt + "\n")
+            logf.flush()
+
+    agora = int(time.time() * 1000)
+    sessoes = load_sessions(args.db, args.idle_window, not args.no_titles)
+    acima = [s for s in sessoes if s["ctx"] >= args.above]
+    alvos = elegiveis(sessoes, args.above, args.ocioso, agora)
+    escreve(f'{time.strftime("%d/%m %H:%M:%S")}  teto={human(args.above)}  acima={len(acima)}  '
+            f'ocioso>={args.ocioso:g}min  elegiveis={len(alvos)}  '
+            f'modo={"APPLY" if args.apply else "aviso"}')
+    for s in alvos:
+        escreve(f'  alvo {s["session"][:26]} ctx={human(s["ctx"])} ocioso={s["ocioso_min"]:.0f}min '
+                f'titulo="{(s.get("title") or "")[:34]}"')
+        if not args.apply:
+            escreve("  -> [aviso] compactaria agora")
+            continue
+        ok, msg = request_compaction(s["session"], binario=BINARIO[0])
+        escreve(f'  -> {"pedido aceito" if ok else "FALHOU"}: {msg[:120]}')
+    return len(alvos)
 
 
 def request_compaction(session: str, timeout: int = 60, binario: str = "opencode") -> tuple[bool, str]:
@@ -414,6 +468,14 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="apenas lista as sessões e tamanhos")
     ap.add_argument("--sessions", type=int, default=0,
                     help="com --status: lista ate N sessoes (uma linha cada)")
+    ap.add_argument("--once", action="store_true",
+                    help="uma varredura (compacta as sessões elegíveis) e sai - para systemd/cron")
+    ap.add_argument("--watch", type=int, default=0, metavar="SEG",
+                    help="varredura contínua a cada SEG segundos (Ctrl-C sai)")
+    ap.add_argument("--ocioso", type=parse_min, default=15.0,
+                    help="só age em sessão ociosa há >= MIN (padrão: 15)")
+    ap.add_argument("--log", default=None,
+                    help="arquivo de log (append) para --once/--watch")
     ap.add_argument("--status", action="store_true",
                     help="uma linha compacta (para painéis/barras, ex.: tclock); não age")
     ap.add_argument("--tui", action="store_true", help="interface interativa (curses)")
@@ -430,6 +492,25 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     args.db = resolver_db(args.db)
     BINARIO[0] = resolver_bin(args.bin)
+
+    if args.once or args.watch:
+        logf = None
+        if args.log:
+            caminho = os.path.expanduser(args.log)
+            os.makedirs(os.path.dirname(caminho) or ".", exist_ok=True)
+            logf = open(caminho, "a", buffering=1)
+        try:
+            while True:
+                varredura(args, logf)
+                if not args.watch:
+                    break
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if logf:
+                logf.close()
+        return 0
 
     if args.status:
         if not os.path.exists(args.db):
