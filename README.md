@@ -68,6 +68,23 @@ Uma linha ASCII, sem as linhas de log — feita para painéis e barras (ex.: wid
 [tclock](https://github.com/akitaonrails/clock-tui)). Ela ignora sessões paradas (>24 h), que não
 interessam ao painel.
 
+### Painel / barra de status
+
+```bash
+opencode-compact-if-big --status
+# maior 852k em voo(1x) | 2 acima de 600k | 31 recentes
+
+opencode-compact-if-big --status --sessions 10     # + ate 10 sessoes (uma linha cada)
+# maior 770k | 2 acima de 600k | 9 recentes
+# ses_f11a26fb8ffe    770k  livre
+# ses_f20220fa2ffe    639k  sub1        <- subagente ativo
+```
+
+Uma linha ASCII (ou uma por sessao com `--sessions N`), sem as linhas de log - feita para painéis e
+barras (ex.: widget de [tclock](https://github.com/akitaonrails/clock-tui)). O estado por sessao vem
+curto: `livre`, `parada`, `turno` (turno em andamento), `subN` (N subagentes ativos), `filaN`.
+Sessões paradas (>24 h) não entram no resumo.
+
 ### TUI
 
 ```

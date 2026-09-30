@@ -52,7 +52,7 @@ import subprocess
 import sys
 import time
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 TESTADO_COM = "opencode v2.0.20 (beta)"
 BINARIO = ["opencode"]  # preenchido em main() (--bin / $OPENCODE_COMPACT_BIN); permite instâncias isoladas
 
@@ -204,6 +204,25 @@ def linha_status(sessions: list[dict], teto: int) -> str:
         est = " parada"
     return (f"maior {human(maior['ctx'])}{est} | "
             f"{len(acima)} acima de {human(teto)} | {len(recentes)} recentes")
+
+
+def linhas_sessoes(sessions: list[dict], n: int) -> list[str]:
+    """Uma linha curta por sessao (mais recentes primeiro), para paineis/barras.
+
+    Formato: '<id curto>  <contexto>  <estado>' - sem titulo, para caber em coluna estreita.
+    """
+    out = []
+    for s in sessions[:max(0, n)]:
+        partes = []
+        if s.get("finish") == "tool-calls":
+            partes.append("turno")
+        if s.get("kids"):
+            partes.append(f"sub{s['kids']}")
+        if s.get("pend"):
+            partes.append(f"fila{s['pend']}")
+        est = " ".join(partes) or ("parada" if s.get("parada") else "livre")
+        out.append(f"{s['session'][:16]:<16} {human(s['ctx']):>7}  {est}")
+    return out
 
 
 def request_compaction(session: str, timeout: int = 60, binario: str = "opencode") -> tuple[bool, str]:
@@ -393,6 +412,8 @@ def main(argv=None) -> int:
     ap.add_argument("--session", help="sessão específica (padrão: a mais recente acima do teto)")
     ap.add_argument("--all", action="store_true", help="considera todas as sessões acima do teto")
     ap.add_argument("--list", action="store_true", help="apenas lista as sessões e tamanhos")
+    ap.add_argument("--sessions", type=int, default=0,
+                    help="com --status: lista ate N sessoes (uma linha cada)")
     ap.add_argument("--status", action="store_true",
                     help="uma linha compacta (para painéis/barras, ex.: tclock); não age")
     ap.add_argument("--tui", action="store_true", help="interface interativa (curses)")
@@ -415,7 +436,10 @@ def main(argv=None) -> int:
             print(f"banco ausente: {args.db}")
             return 2
         try:
-            print(linha_status(load_sessions(args.db, args.idle_window, False), args.above))
+            sess = load_sessions(args.db, args.idle_window, False)
+            print(linha_status(sess, args.above))
+            for linha in linhas_sessoes(sorted(sess, key=lambda x: -x["t"]), args.sessions):
+                print(linha)
         except SystemExit as e:
             print(str(e).splitlines()[0])
             return 2

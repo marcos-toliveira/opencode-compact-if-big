@@ -192,6 +192,28 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+class TestStatusSessions(unittest.TestCase):
+    """--sessions N: uma linha curta por sessao, para paineis."""
+
+    def test_lista_ate_n(self):
+        sess = [{"session": "ses_aaaaaaaaaaaa1", "ctx": 768_000, "em_voo": [], "parada": False, "finish": "stop", "kids": 0, "pend": 0},
+                {"session": "ses_bbbbbbbbbbbb2", "ctx": 639_000, "em_voo": ["1 sub"], "parada": False, "finish": "tool-calls", "kids": 1, "pend": 0},
+                {"session": "ses_cccccccccccc3", "ctx": 1_000, "em_voo": [], "parada": True, "finish": "stop", "kids": 0, "pend": 0}]
+        linhas = OCIB.linhas_sessoes(sess, 2)
+        self.assertEqual(len(linhas), 2)
+        self.assertIn("768k", linhas[0])
+        self.assertIn("livre", linhas[0])
+        self.assertIn("turno", linhas[1], "turno em andamento aparece como 'turno'")
+        self.assertIn("sub1", linhas[1])
+
+    def test_n_zero_nao_lista(self):
+        self.assertEqual(OCIB.linhas_sessoes([{"session": "ses_x", "ctx": 1, "em_voo": [], "parada": False}], 0), [])
+
+    def test_parada_marcada(self):
+        linhas = OCIB.linhas_sessoes([{"session": "ses_x", "ctx": 1, "em_voo": [], "parada": True, "finish": "stop", "kids": 0, "pend": 0}], 1)
+        self.assertIn("parada", linhas[0])
+
+
 class TestResolucaoDeDb(unittest.TestCase):
     def test_explicito_vence(self):
         self.assertEqual(OCIB.resolver_db("/tmp/x.db"), "/tmp/x.db")
