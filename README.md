@@ -41,10 +41,14 @@ Logo: compactar ajuda, mas **quando** compactar é decisão sua — e nunca no m
 ```bash
 git clone https://github.com/marcos-toliveira/opencode-compact-if-big
 cd opencode-compact-if-big
-./install.sh          # copia para ~/.local/bin
+cargo build --release    # binário zero-dependência (só a std)
+./install.sh             # copia target/release/opencode-compact-if-big para ~/.local/bin
 ```
 
-Requisitos: `python3` 3.8+ e o binário `opencode` no `PATH`.
+Requisitos: `sqlite3` e o binário `opencode` no `PATH`. O utilitário é escrito em
+**Rust (edição 2024, zero dependências além da std)**; `install.sh` compila e instala o
+artefato de `target/release/`. O script Python original (`opencode-compact-if-big`) é mantido
+como referência de paridade.
 
 ## Uso
 
@@ -187,11 +191,20 @@ reportar números errados). Se quebrar, abra uma issue com a saída de `opencode
 ## Testes
 
 ```bash
-python3 -m unittest discover -s tests -v
+cargo test
+# paridade byte-a-byte com o Python original (opcional):
+OCIB_PARITY_PY="$PWD/opencode-compact-if-big" cargo test --test cli
 ```
 
-Os testes constroem um banco SQLite temporário com o schema mínimo e cobrem as três travas, o caso
-"subagente antigo não marca em voo", o modo dry-run (que **não** chama a API) e o `--no-titles`.
+- **Unitários** (`src/main.rs`): `parse_size`, `parse_min`, `human`, `idade`, `elegiveis`,
+  `linha_status`, `linhas_sessoes`, o parser JSON e a precedência de `--bin`.
+- **Integração** (`tests/cli.rs`): constrói um banco SQLite temporário com `sqlite3` e o schema
+  mínimo, e cobre `--list`, `--status`, dry-run, `--above`, recusa por trabalho em voo e
+  `--version`. Com `OCIB_PARITY_PY` definido, compara `--status`/`--list` **byte a byte** com a
+  saída do Python no mesmo fixture.
+
+Os testes Python legados seguem em `tests/test_guard.py` (referência das travas, do dry-run e
+do `--no-titles`):
 
 ## Aviso
 
